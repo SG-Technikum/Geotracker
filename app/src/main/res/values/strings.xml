@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">Geotracker</string>
+    <string name="navigation_drawer_open">Menü öffnen</string>
+    <string name="navigation_drawer_close">Menü schließen</string>
 </resources>

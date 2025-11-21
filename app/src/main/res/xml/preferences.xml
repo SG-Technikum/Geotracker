@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PreferenceScreen
+    xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <SwitchPreferenceCompat
+        android:key="pref_tracking_enabled"
+        android:title="Tracking aktiv"
+        android:summary="Wenn aktiviert, werden Koordinaten aufgezeichnet"
+        android:defaultValue="true" />
+
+    <ListPreference
+        android:key="pref_update_interval"
+        android:title="Update-Intervall"
+        android:entries="@array/pref_update_interval_entries"
+        android:entryValues="@array/pref_update_interval_values"
+        android:defaultValue="1000"
+        android:summary="Zeit zwischen Standortaktualisierungen" />
+
+</PreferenceScreen>

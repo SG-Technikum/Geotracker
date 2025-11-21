@@ -6,20 +6,28 @@ import android.content.pm.PackageManager;
 import android.location.Location;
 import android.os.Bundle;
 import android.preference.PreferenceManager;
+import android.view.Menu;
+import android.view.MenuItem;
 import android.widget.Button;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import android.content.Intent;
 import android.net.Uri;
+import androidx.annotation.NonNull;
 import androidx.core.content.FileProvider;
 import java.io.File;
 
 import org.osmdroid.util.GeoPoint;
 import org.osmdroid.views.MapView;
 import org.osmdroid.views.overlay.Marker;
-
 import org.osmdroid.views.overlay.Polyline;
+
+import androidx.appcompat.widget.Toolbar;
+import androidx.appcompat.app.ActionBarDrawerToggle;
+import androidx.drawerlayout.widget.DrawerLayout;
+
+import com.google.android.material.navigation.NavigationView;
 
 import java.io.BufferedReader;
 import java.io.FileInputStream;
@@ -43,7 +51,7 @@ import com.google.android.gms.location.LocationServices;
 
 import java.io.FileOutputStream;
 
-public class MainActivity extends AppCompatActivity {
+public class MainActivity extends AppCompatActivity implements NavigationView.OnNavigationItemSelectedListener {
 
     private static final int PERMISSIONS_REQUEST_LOCATION = 100;
     private FusedLocationProviderClient fusedLocationClient;
@@ -53,20 +61,39 @@ public class MainActivity extends AppCompatActivity {
 
     private List<GeoPoint> savedPoints = new ArrayList<>();
 
+    private DrawerLayout drawerLayout;
+    private ActionBarDrawerToggle drawerToggle;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         EdgeToEdge.enable(this);
         setContentView(R.layout.activity_main);
 
+        // Toolbar und DrawerLayout einrichten
+        Toolbar toolbar = findViewById(R.id.toolbar);
+        setSupportActionBar(toolbar);
+
+        drawerLayout = findViewById(R.id.drawer_layout);
+        NavigationView navigationView = findViewById(R.id.nav_view);
+        navigationView.setNavigationItemSelectedListener(this);
+
+        drawerToggle = new ActionBarDrawerToggle(
+                this, drawerLayout, toolbar,
+                R.string.navigation_drawer_open,
+                R.string.navigation_drawer_close);
+        drawerLayout.addDrawerListener(drawerToggle);
+        drawerToggle.syncState();
+
+        // OSMDroid Konfiguration laden
         Context ctx = getApplicationContext();
         org.osmdroid.config.Configuration.getInstance().load(ctx, PreferenceManager.getDefaultSharedPreferences(ctx));
-
 
         textView = findViewById(R.id.tv_active_geo);
         map = findViewById(R.id.map);
         map.setMultiTouchControls(true);
 
+        // Buttons
         Button btnSaveLocation = findViewById(R.id.btn_save_location);
         btnSaveLocation.setOnClickListener(v -> {
             saveLocationToCSV();
@@ -80,16 +107,17 @@ public class MainActivity extends AppCompatActivity {
             Toast.makeText(this, "Karte aktualisiert", Toast.LENGTH_SHORT).show();
         });
 
-
         Button btnShareCsv = findViewById(R.id.btn_share_csv);
         btnShareCsv.setOnClickListener(v -> shareCsvFile());
 
+        // EdgeToEdge Padding
         ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.main), (v, insets) -> {
             Insets systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars());
             v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom);
             return insets;
         });
 
+        // Standort-Client initialisieren
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
 
         locationCallback = new LocationCallback() {
@@ -109,7 +137,7 @@ public class MainActivity extends AppCompatActivity {
             }
         };
 
-        // Karte initial laden und Marker setzen
+        // Karte initial laden und markieren
         loadPointsFromCSV();
         updateMapMarkers();
 
@@ -121,6 +149,36 @@ public class MainActivity extends AppCompatActivity {
         } else {
             startLocationUpdates();
         }
+    }
+
+    @Override
+    public boolean onCreateOptionsMenu(Menu menu) {
+        getMenuInflater().inflate(R.menu.menu_main, menu); // Menü xml mit Hamburger-Icon
+        return true;
+    }
+
+    @Override
+    public boolean onOptionsItemSelected(MenuItem item) {
+        if (drawerToggle.onOptionsItemSelected(item)) {
+            return true;
+        }
+        return super.onOptionsItemSelected(item);
+    }
+
+    @Override
+    public boolean onNavigationItemSelected(@NonNull MenuItem item) {
+        int id = item.getItemId();
+
+        if (id == R.id.nav_home) {
+            // Optional: Home-Logik, z.B. Drawer nur schließen
+            Toast.makeText(this, "Home", Toast.LENGTH_SHORT).show();
+        } else if (id == R.id.nav_settings) {
+            Intent intent = new Intent(this, SettingsActivity.class);
+            startActivity(intent);
+        }
+
+        drawerLayout.closeDrawer(androidx.core.view.GravityCompat.START);
+        return true;
     }
 
     private void saveLocationToCSV() {
@@ -155,7 +213,6 @@ public class MainActivity extends AppCompatActivity {
 
         startActivity(Intent.createChooser(intent, "CSV-Datei teilen"));
     }
-
 
     private void startLocationUpdates() {
         LocationRequest locationRequest = LocationRequest.create();
@@ -220,7 +277,6 @@ public class MainActivity extends AppCompatActivity {
 
         map.invalidate();
     }
-
 
     @Override
     protected void onPause() {
