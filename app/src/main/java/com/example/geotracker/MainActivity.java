@@ -73,6 +73,14 @@ public class MainActivity extends AppCompatActivity {
             updateMapMarkers();
         });
 
+        Button btnUpdateMap = findViewById(R.id.btn_update_map);
+        btnUpdateMap.setOnClickListener(v -> {
+            loadPointsFromCSV();
+            updateMapMarkers();
+            Toast.makeText(this, "Karte aktualisiert", Toast.LENGTH_SHORT).show();
+        });
+
+
         Button btnShareCsv = findViewById(R.id.btn_share_csv);
         btnShareCsv.setOnClickListener(v -> shareCsvFile());
 
@@ -186,16 +194,30 @@ public class MainActivity extends AppCompatActivity {
 
     private void updateMapMarkers() {
         map.getOverlays().clear();
+
+        // Marker setzen
         for (GeoPoint point : savedPoints) {
             Marker marker = new Marker(map);
             marker.setPosition(point);
             marker.setTitle("Standort");
             map.getOverlays().add(marker);
         }
+
+        // Polyline erstellen und Punkte verbinden
+        if (savedPoints.size() > 1) {
+            Polyline line = new Polyline(map);
+            line.setPoints(savedPoints);
+            line.setColor(0x800000FF); // halbtransparentes Blau
+            line.setWidth(15f);
+            map.getOverlays().add(line);
+        }
+
+        // Karte zentrieren auf neuesten Punkt
         if (!savedPoints.isEmpty()) {
             map.getController().setCenter(savedPoints.get(savedPoints.size() - 1));
             map.getController().setZoom(15);
         }
+
         map.invalidate();
     }
 
