@@ -44,4 +44,5 @@ dependencies {
     implementation("com.google.android.gms:play-services-location:21.0.1")
     implementation("org.osmdroid:osmdroid-android:6.1.14")
     implementation("androidx.preference:preference:1.2.1")
+    implementation("com.google.code.gson:gson:2.10.1")
 }

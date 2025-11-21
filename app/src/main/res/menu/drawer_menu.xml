@@ -2,4 +2,23 @@
 <menu xmlns:android="http://schemas.android.com/apk/res/android">
     <item android:id="@+id/nav_home" android:title="Startseite" />
     <item android:id="@+id/nav_settings" android:title="Einstellungen" />
+    <item
+        android:id="@+id/nav_new_track"
+        android:title="Neuen Pfad erstellen" />
+
+    <item
+        android:id="@+id/nav_select_track"
+        android:title="Aktiven Pfad wählen" />
+
+    <item
+        android:id="@+id/nav_visibility"
+        android:title="Sichtbare Pfade" />
+
+    <item
+        android:id="@+id/nav_export_track"
+        android:title="Pfad exportieren" />
+
+    <item
+        android:id="@+id/nav_delete_track"
+        android:title="Pfad löschen" />
 </menu>
