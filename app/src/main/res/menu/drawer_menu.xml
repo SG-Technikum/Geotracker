@@ -4,21 +4,21 @@
     <item android:id="@+id/nav_settings" android:title="Einstellungen" />
     <item
         android:id="@+id/nav_new_track"
-        android:title="Neuen Pfad erstellen" />
+        android:title="Neuen Track erstellen" />
 
     <item
         android:id="@+id/nav_select_track"
-        android:title="Aktiven Pfad wählen" />
+        android:title="Aktiven Track wählen" />
 
     <item
         android:id="@+id/nav_visibility"
-        android:title="Sichtbare Pfade" />
+        android:title="Sichtbare Tracks" />
 
     <item
         android:id="@+id/nav_export_track"
-        android:title="Pfad exportieren" />
+        android:title="Track exportieren" />
 
     <item
         android:id="@+id/nav_delete_track"
-        android:title="Pfad löschen" />
+        android:title="Track löschen" />
 </menu>
