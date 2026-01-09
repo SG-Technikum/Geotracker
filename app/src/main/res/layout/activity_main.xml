@@ -22,25 +22,43 @@
             android:elevation="4dp"
             android:theme="@style/ThemeOverlay.AppCompat.Dark.ActionBar" />
 
+        <!-- ✅ NEU: Continuous Mode Toggle Button -->
+        <Button
+            android:id="@+id/btn_toggle_continuous"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Continuous: AUS"
+            android:textColor="@android:color/white"
+            android:backgroundTint="#FF5722"
+            app:layout_constraintTop_toBottomOf="@id/toolbar"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            android:layout_marginTop="8dp"
+            android:layout_marginBottom="8dp" />
+
         <Button
             android:id="@+id/btn_save_location"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="Koordinaten sichern"
-            app:layout_constraintTop_toBottomOf="@id/toolbar"
+            app:layout_constraintTop_toBottomOf="@id/btn_toggle_continuous"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintEnd_toEndOf="parent"
             android:layout_marginTop="16dp" />
 
         <TextView
             android:id="@+id/tv_active_geo"
-            android:layout_width="wrap_content"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:text="Noch keine Koordinaten"
             android:textSize="18sp"
+            android:padding="16dp"
+            android:background="#F0F0F0"
+            android:gravity="center"
             app:layout_constraintTop_toBottomOf="@id/btn_save_location"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintWidth_percent="0.9"
             android:layout_marginTop="16dp" />
 
         <Button
@@ -71,7 +89,10 @@
             app:layout_constraintBottom_toBottomOf="parent"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintEnd_toEndOf="parent"
-            android:layout_marginTop="16dp" />
+            android:layout_marginTop="16dp"
+            android:layout_marginBottom="16dp"
+            android:layout_marginStart="8dp"
+            android:layout_marginEnd="8dp" />
 
     </androidx.constraintlayout.widget.ConstraintLayout>
 
@@ -81,6 +102,7 @@
         android:layout_width="wrap_content"
         android:layout_height="match_parent"
         android:layout_gravity="start"
+        app:headerLayout="@layout/nav_header_main"
         app:menu="@menu/drawer_menu" />
 
 </androidx.drawerlayout.widget.DrawerLayout>

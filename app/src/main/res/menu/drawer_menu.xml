@@ -1,29 +1,48 @@
 <?xml version="1.0" encoding="utf-8"?>
 <menu xmlns:android="http://schemas.android.com/apk/res/android">
-    <item android:id="@+id/nav_home" android:title="Startseite" />
-    <item android:id="@+id/nav_settings" android:title="Einstellungen" />
-    <item
-        android:id="@+id/nav_new_track"
-        android:title="Neuen Track erstellen" />
+    <group android:checkableBehavior="single">
+        <item
+            android:id="@+id/nav_home"
+            android:icon="@android:drawable/ic_menu_info_details"
+            android:title="Home" />
+        <item
+            android:id="@+id/nav_toggle_continuous"
+            android:icon="@android:drawable/ic_menu_compass"
+            android:title="Continuous Mode" />
+    </group>
+
+    <item android:title="Tracks">
+        <menu>
+            <item
+                android:id="@+id/nav_new_track"
+                android:icon="@android:drawable/ic_menu_add"
+                android:title="Neuer Track" />
+            <item
+                android:id="@+id/nav_select_track"
+                android:icon="@android:drawable/ic_menu_edit"
+                android:title="Track wählen" />
+            <item
+                android:id="@+id/nav_visibility"
+                android:icon="@android:drawable/ic_menu_view"
+                android:title="Sichtbarkeit" />
+        </menu>
+    </item>
+
+    <item android:title="Aktionen">
+        <menu>
+            <item
+                android:id="@+id/nav_export_track"
+                android:icon="@android:drawable/ic_menu_share"
+                android:title="Exportieren" />
+            <item
+                android:id="@+id/nav_delete_track"
+                android:icon="@android:drawable/ic_menu_delete"
+                android:title="Löschen" />
+        </menu>
+    </item>
 
     <item
-        android:id="@+id/nav_select_track"
-        android:title="Aktiven Track wählen" />
-
-    <item
-        android:id="@+id/nav_visibility"
-        android:title="Sichtbare Tracks" />
-
-    <item
-        android:id="@+id/nav_export_track"
-        android:title="Track exportieren" />
-
-    <item
-        android:id="@+id/nav_delete_track"
-        android:title="Track löschen" />
-
-    <item
-        android:id="@+id/nav_toggle_continuous"
-        android:title="Continuous Mode umschalten" />
-
+        android:id="@+id/nav_settings"
+        android:icon="@android:drawable/ic_menu_preferences"
+        android:title="Einstellungen" />
 </menu>
