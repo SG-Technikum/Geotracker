@@ -1,7 +1,6 @@
 package com.example.geotracker;
 
 import android.Manifest;
-import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -11,10 +10,13 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
 import android.preference.PreferenceManager;
-import android.provider.MediaStore;
+import android.view.KeyEvent;
 import android.view.Menu;
 import android.view.MenuItem;
+import android.view.View;
 import android.view.ViewGroup;
+import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ImageView;
@@ -255,13 +257,10 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
                     if (uri == null || pendingImageTrack == null || pendingImageTs == null) return;
 
                     try {
-                        // Persistenter Zugriff (für ACTION_OPEN_DOCUMENT)
                         getContentResolver().takePersistableUriPermission(
                                 uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
                         );
-                    } catch (Exception ignored) {
-                        // Manche Provider geben keine persistable permissions -> dann funktioniert es evtl. nur temporär.
-                    }
+                    } catch (Exception ignored) { }
 
                     Map<String, PointMeta> meta = getMetaMap(pendingImageTrack);
                     PointMeta pm = meta.getOrDefault(pendingImageTs, new PointMeta());
@@ -474,8 +473,7 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
                 r.lon = Double.parseDouble(parts[3].trim());
                 result.add(r);
             }
-        } catch (Exception ignored) {
-        }
+        } catch (Exception ignored) { }
         return result;
     }
 
@@ -705,7 +703,7 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         String json = gson.toJson(meta);
         try (FileOutputStream fos = openFileOutput(f.getName(), MODE_PRIVATE)) {
             fos.write(json.getBytes());
-        } catch (Exception ignored) {}
+        } catch (Exception ignored) { }
         metaCache.put(t.filename, meta);
     }
 
@@ -727,6 +725,13 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         startActivity(Intent.createChooser(intent, "CSV-Datei teilen"));
     }
 
+    // --- Keyboard helper ---
+    private void hideKeyboard(View v) {
+        if (v == null) return;
+        InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+        if (imm != null) imm.hideSoftInputFromWindow(v.getWindowToken(), 0);
+    }
+
     private void showCreateTrackDialog() {
         String[] colorNames = {"Rot", "Grün", "Blau", "Orange", "Lila"};
         int[] colorValues = {0xFFFF0000, 0xFF00FF00, 0xFF0000FF, 0xFFFF8800, 0xFFAA00FF};
@@ -734,40 +739,100 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         final int[] selectedIndex = {0};
 
         AlertDialog.Builder builder = new AlertDialog.Builder(this);
-        builder.setTitle("Neuen Track erstellen");
+        Context themedCtx = builder.getContext();
 
-        final EditText input = new EditText(this);
+        // --- Custom Title oben + Button (wird nicht von Tastatur verdeckt) ---
+        LinearLayout titleBar = new LinearLayout(themedCtx);
+        titleBar.setOrientation(LinearLayout.HORIZONTAL);
+        int pad = (int) (16 * getResources().getDisplayMetrics().density);
+        titleBar.setPadding(pad, pad, pad, pad);
+
+        TextView tvTitle = new TextView(themedCtx);
+        tvTitle.setText("Neuen Track erstellen");
+        tvTitle.setTextSize(18f);
+        tvTitle.setLayoutParams(new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        Button btnHideKb = new Button(themedCtx);
+        btnHideKb.setText("Tastatur zu");
+
+        titleBar.addView(tvTitle);
+        titleBar.addView(btnHideKb);
+
+        builder.setCustomTitle(titleBar);
+
+        // --- Inhalt ---
+        final EditText input = new EditText(themedCtx);
         input.setHint("Track-Name");
         builder.setView(input);
 
-        builder.setSingleChoiceItems(colorNames, 0, (dialog, which) -> selectedIndex[0] = which);
+        // "Done" Taste auf der Tastatur + Listener, der NUR Tastatur schließt
+        input.setSingleLine(true);
+        input.setImeOptions(EditorInfo.IME_ACTION_DONE);
+        input.setOnEditorActionListener((v, actionId, event) -> {
+            boolean isDone = actionId == EditorInfo.IME_ACTION_DONE;
+            boolean isEnter = event != null
+                    && event.getKeyCode() == KeyEvent.KEYCODE_ENTER
+                    && event.getAction() == KeyEvent.ACTION_DOWN;
 
-        builder.setPositiveButton("OK", (dialog, which) -> {
-            String name = input.getText().toString().trim();
-            if (name.isEmpty()) {
-                Toast.makeText(this, "Name darf nicht leer sein", Toast.LENGTH_SHORT).show();
-                return;
+            if (isDone || isEnter) {
+                hideKeyboard(input);
+                input.clearFocus();
+                return true;
             }
-            String filename = "track_" + name.replaceAll("\\s+", "_") + ".csv";
-            int color = colorValues[selectedIndex[0]];
-            TrackInfo t = new TrackInfo(name, filename, color);
-            tracks.add(t);
-
-            boolean[] newVisible = new boolean[tracks.size()];
-            System.arraycopy(visibleTracks, 0, newVisible, 0, visibleTracks.length);
-            newVisible[tracks.size() - 1] = true;
-            visibleTracks = newVisible;
-
-            currentTrack = t;
-            saveAllTrackPrefs();
-
-            File f = new File(getFilesDir(), filename);
-            ensureCsvHasHeader(f);
-            loadAllTracksAndUpdateMap();
+            return false;
         });
 
+        builder.setSingleChoiceItems(colorNames, 0, (dialog, which) -> selectedIndex[0] = which);
+
+        // Buttons unten (OK/Abbrechen) ohne Auto-Dismiss (für Validierung)
+        builder.setPositiveButton("OK", null);
         builder.setNegativeButton("Abbrechen", null);
-        builder.show();
+
+        AlertDialog dialog = builder.create();
+
+        dialog.setOnShowListener(d -> {
+            btnHideKb.setOnClickListener(v -> {
+                hideKeyboard(input);
+                input.clearFocus();
+            });
+
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+                String name = input.getText().toString().trim();
+                if (name.isEmpty()) {
+                    Toast.makeText(this, "Name darf nicht leer sein", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+
+                hideKeyboard(input);
+
+                String filename = "track_" + name.replaceAll("\\s+", "_") + ".csv";
+                int color = colorValues[selectedIndex[0]];
+                TrackInfo t = new TrackInfo(name, filename, color);
+                tracks.add(t);
+
+                boolean[] newVisible = new boolean[tracks.size()];
+                System.arraycopy(visibleTracks, 0, newVisible, 0, visibleTracks.length);
+                newVisible[tracks.size() - 1] = true;
+                visibleTracks = newVisible;
+
+                currentTrack = t;
+                saveAllTrackPrefs();
+
+                File f = new File(getFilesDir(), filename);
+                ensureCsvHasHeader(f);
+                loadAllTracksAndUpdateMap();
+
+                dialog.dismiss();
+            });
+
+            dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener(v -> {
+                hideKeyboard(input);
+                dialog.dismiss();
+            });
+        });
+
+        dialog.show();
     }
 
     private void showSelectCurrentTrackDialog() {
