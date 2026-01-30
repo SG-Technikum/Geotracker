@@ -5,6 +5,10 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorManager;
 import android.location.Location;
 import android.net.Uri;
 import android.os.Bundle;
@@ -13,10 +17,13 @@ import android.preference.PreferenceManager;
 import android.view.KeyEvent;
 import android.view.Menu;
 import android.view.MenuItem;
+import android.view.Surface;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
+import android.webkit.MimeTypeMap;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ImageView;
@@ -53,14 +60,19 @@ import org.osmdroid.util.GeoPoint;
 import org.osmdroid.views.MapView;
 import org.osmdroid.views.overlay.Marker;
 import org.osmdroid.views.overlay.Polyline;
+import org.osmdroid.views.overlay.mylocation.DirectedLocationOverlay;
 
+import java.io.BufferedOutputStream;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.lang.reflect.Type;
+import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -69,8 +81,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
-public class MainActivity extends AppCompatActivity implements NavigationView.OnNavigationItemSelectedListener {
+public class MainActivity extends AppCompatActivity implements NavigationView.OnNavigationItemSelectedListener, SensorEventListener {
 
     private static final int PERMISSIONS_REQUEST_LOCATION = 100;
     private static final String PREF_TRACKS = "tracks_json";
@@ -80,12 +94,22 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
 
     private FusedLocationProviderClient fusedLocationClient;
     private LocationCallback locationCallback;
+
     private TextView textView;
     private MapView map;
     private Button btnToggleContinuous;
 
     private DrawerLayout drawerLayout;
     private ActionBarDrawerToggle drawerToggle;
+
+    // Standort overlay (Kreis + Pfeil)
+    private DirectedLocationOverlay myLocationOverlay;
+    private Location lastLocation = null;
+
+    // Kompass / Blickrichtung
+    private SensorManager sensorManager;
+    private Sensor rotationVectorSensor;
+    private float lastAzimuthDeg = Float.NaN;
 
     public static class TrackInfo {
         String name;
@@ -99,12 +123,12 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         }
     }
 
-    // CSV Record (mit Timestamp als eindeutige ID)
+    // CSV Record
     static class PointRecord {
         String ts;
-        String type;
         double lat;
         double lon;
+        String mode; // MANUAL / CONTINUOUS / HIGHLIGHT
     }
 
     // Meta zu einem Punkt (Kommentar + Bild(e))
@@ -132,6 +156,9 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
 
     // TrackFilename -> (Timestamp -> Meta)
     private final Map<String, Map<String, PointMeta>> metaCache = new HashMap<>();
+
+    // Marker-Icon Cache pro Farbe
+    private final Map<Integer, android.graphics.drawable.Drawable> markerIconCache = new HashMap<>();
 
     // Bild-Picker / Kamera
     private ActivityResultLauncher<String[]> pickImageLauncher;
@@ -169,15 +196,16 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         map = findViewById(R.id.map);
         map.setMultiTouchControls(true);
 
+        // Standort-Overlay (Kreis + Pfeil)
+        myLocationOverlay = new DirectedLocationOverlay(this);
+        myLocationOverlay.setShowAccuracy(true);
+
         initActivityResultLaunchers();
 
         Button btnSaveLocation = findViewById(R.id.btn_save_location);
         btnSaveLocation.setOnClickListener(v -> {
-            if (continuousMode) {
-                addHighlightPoint();
-            } else {
-                saveLocationToCSV();
-            }
+            if (continuousMode) addHighlightPoint();
+            else saveLocationToCSV();
             loadAllTracksAndUpdateMap();
         });
 
@@ -187,6 +215,7 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
             Toast.makeText(this, "Karte aktualisiert", Toast.LENGTH_SHORT).show();
         });
 
+        // "Exportieren": ZIP (CSV + Bilder)
         Button btnShareCsv = findViewById(R.id.btn_share_csv);
         btnShareCsv.setOnClickListener(v -> showExportDialog());
 
@@ -199,8 +228,13 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
             return insets;
         });
 
-        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
+        // Sensor für Blickrichtung (Rotation Vector)
+        sensorManager = (SensorManager) getSystemService(Context.SENSOR_SERVICE);
+        if (sensorManager != null) {
+            rotationVectorSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR);
+        }
 
+        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
         locationCallback = new LocationCallback() {
             @Override
             public void onLocationResult(LocationResult locationResult) {
@@ -209,15 +243,21 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
                     return;
                 }
                 for (Location location : locationResult.getLocations()) {
-                    if (location != null) {
-                        String coords = "Latitude: " + location.getLatitude() +
-                                "\nLongitude: " + location.getLongitude() +
-                                (continuousMode ? "\n[CONTINUOUS MODE]" : "");
-                        textView.setText(coords);
+                    if (location == null) continue;
 
-                        if (continuousMode && currentTrack != null) {
-                            saveLocationContinuous(location);
-                        }
+                    lastLocation = location;
+
+                    String coords = "Latitude: " + location.getLatitude() +
+                            "\nLongitude: " + location.getLongitude() +
+                            (continuousMode ? "\n[CONTINUOUS MODE]" : "");
+                    textView.setText(coords);
+
+                    // Overlay updaten
+                    updateMyLocationOverlay();
+
+                    // Continuous Tracking
+                    if (continuousMode && currentTrack != null) {
+                        saveLocationContinuous(location);
                     }
                 }
             }
@@ -235,6 +275,9 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
             visibleTracks = new boolean[]{true};
             saveAllTrackPrefs();
             ensureCsvHasHeader(new File(getFilesDir(), t.filename));
+        } else {
+            for (TrackInfo t : tracks) ensureCsvHasHeader(new File(getFilesDir(), t.filename));
+            if (currentTrack == null && !tracks.isEmpty()) currentTrack = tracks.get(0);
         }
 
         updateToggleButtonUI();
@@ -377,10 +420,10 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
             ensureCsvHasHeader(file);
 
             String timestamp = LocalDateTime.now().toString();
-            String row = timestamp + ",HIGHLIGHT," + lat + "," + lon + "\n";
+            String row = timestamp + "," + lat + "," + lon + ",HIGHLIGHT\n";
 
             try (FileOutputStream fos = openFileOutput(currentTrack.filename, MODE_APPEND)) {
-                fos.write(row.getBytes());
+                fos.write(row.getBytes(StandardCharsets.UTF_8));
                 Toast.makeText(this, "Highlight-Punkt gespeichert", Toast.LENGTH_SHORT).show();
             }
         } catch (Exception e) {
@@ -397,10 +440,10 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
             ensureCsvHasHeader(file);
 
             String timestamp = LocalDateTime.now().toString();
-            String row = timestamp + ",CONTINUOUS," + location.getLatitude() + "," + location.getLongitude() + "\n";
+            String row = timestamp + "," + location.getLatitude() + "," + location.getLongitude() + ",CONTINUOUS\n";
 
             try (FileOutputStream fos = openFileOutput(currentTrack.filename, MODE_APPEND)) {
-                fos.write(row.getBytes());
+                fos.write(row.getBytes(StandardCharsets.UTF_8));
             }
         } catch (Exception e) {
             e.printStackTrace();
@@ -408,10 +451,10 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
     }
 
     private void ensureCsvHasHeader(File file) {
-        if (!file.exists()) {
+        if (!file.exists() || file.length() == 0) {
             try (FileOutputStream fos = openFileOutput(file.getName(), MODE_PRIVATE)) {
-                String header = "Timestamp,Type,Latitude,Longitude\n";
-                fos.write(header.getBytes());
+                String header = "Timestamp,Latitude,Longitude,Mode\n";
+                fos.write(header.getBytes(StandardCharsets.UTF_8));
             } catch (Exception e) {
                 e.printStackTrace();
             }
@@ -439,10 +482,10 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
             ensureCsvHasHeader(file);
 
             String timestamp = LocalDateTime.now().toString();
-            String row = timestamp + ",MANUAL," + lat + "," + lon + "\n";
+            String row = timestamp + "," + lat + "," + lon + ",MANUAL\n";
 
             try (FileOutputStream fos = openFileOutput(currentTrack.filename, MODE_APPEND)) {
-                fos.write(row.getBytes());
+                fos.write(row.getBytes(StandardCharsets.UTF_8));
                 Toast.makeText(this, "Koordinaten gespeichert", Toast.LENGTH_SHORT).show();
             }
         } catch (Exception e) {
@@ -451,27 +494,62 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         }
     }
 
+    /**
+     * Liest sowohl:
+     * - NEU: Timestamp,Latitude,Longitude,Mode
+     * - ALT: Timestamp,Type,Latitude,Longitude
+     */
     private List<PointRecord> loadRecordsFromCsv(String filename) {
         List<PointRecord> result = new ArrayList<>();
         try (FileInputStream fis = openFileInput(filename);
-             BufferedReader reader = new BufferedReader(new InputStreamReader(fis))) {
+             BufferedReader reader = new BufferedReader(new InputStreamReader(fis, StandardCharsets.UTF_8))) {
+
+            String headerLine = reader.readLine();
+            if (headerLine == null) return result;
+
+            String[] headers = headerLine.split(",");
+            Map<String, Integer> idx = new HashMap<>();
+            for (int i = 0; i < headers.length; i++) {
+                idx.put(headers[i].trim().toLowerCase(Locale.US), i);
+            }
+
+            int iTs = idx.getOrDefault("timestamp", 0);
+
+            // Neu
+            int iLatN = idx.getOrDefault("latitude", -1);
+            int iLonN = idx.getOrDefault("longitude", -1);
+            int iModeN = idx.getOrDefault("mode", -1);
+
+            // Alt
+            int iTypeO = idx.getOrDefault("type", 1);
+            int iLatO = idx.getOrDefault("latitude", 2);
+            int iLonO = idx.getOrDefault("longitude", 3);
+
+            boolean newFormat = (iLatN >= 0 && iLonN >= 0 && iModeN >= 0);
 
             String line;
-            boolean first = true;
             while ((line = reader.readLine()) != null) {
-                if (first) {
-                    first = false;
-                    continue;
-                }
-                String[] parts = line.split(",");
-                if (parts.length < 4) continue;
+                if (line.trim().isEmpty()) continue;
+                String[] parts = line.split(",", -1);
 
-                PointRecord r = new PointRecord();
-                r.ts = parts[0].trim();
-                r.type = parts[1].trim();
-                r.lat = Double.parseDouble(parts[2].trim());
-                r.lon = Double.parseDouble(parts[3].trim());
-                result.add(r);
+                try {
+                    PointRecord r = new PointRecord();
+                    if (newFormat) {
+                        int need = Math.max(Math.max(iTs, iLatN), Math.max(iLonN, iModeN));
+                        if (parts.length <= need) continue;
+                        r.ts = parts[iTs].trim();
+                        r.lat = Double.parseDouble(parts[iLatN].trim());
+                        r.lon = Double.parseDouble(parts[iLonN].trim());
+                        r.mode = parts[iModeN].trim();
+                    } else {
+                        if (parts.length < 4) continue;
+                        r.ts = parts[0].trim();
+                        r.mode = parts[iTypeO].trim();
+                        r.lat = Double.parseDouble(parts[iLatO].trim());
+                        r.lon = Double.parseDouble(parts[iLonO].trim());
+                    }
+                    result.add(r);
+                } catch (Exception ignored) { }
             }
         } catch (Exception ignored) { }
         return result;
@@ -480,7 +558,16 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
     private List<PointRecord> filterHighlight(List<PointRecord> all) {
         List<PointRecord> res = new ArrayList<>();
         for (PointRecord r : all) {
-            if ("HIGHLIGHT".equals(r.type)) res.add(r);
+            if ("HIGHLIGHT".equals(r.mode)) res.add(r);
+        }
+        return res;
+    }
+
+    // CONTINUOUS dauerhaft auf Karte ausblenden (Marker + Polyline)
+    private List<PointRecord> filterOutContinuous(List<PointRecord> all) {
+        List<PointRecord> res = new ArrayList<>();
+        for (PointRecord r : all) {
+            if (!"CONTINUOUS".equals(r.mode)) res.add(r);
         }
         return res;
     }
@@ -498,16 +585,31 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
             if (visibleTracks.length <= i || !visibleTracks[i]) continue;
 
             TrackInfo t = tracks.get(i);
+
             List<PointRecord> allRecords = loadRecordsFromCsv(t.filename);
-            List<PointRecord> markerRecords = continuousMode ? filterHighlight(allRecords) : allRecords;
+
+            // Karte: CONTINUOUS nie anzeigen
+            List<PointRecord> visibleRecords = filterOutContinuous(allRecords);
+
+            // Marker:
+            // - Continuous Mode: nur Highlights
+            // - sonst: MANUAL + HIGHLIGHT
+            List<PointRecord> markerRecords = continuousMode
+                    ? filterHighlight(visibleRecords)
+                    : visibleRecords;
 
             Map<String, PointMeta> meta = getMetaMap(t);
+            android.graphics.drawable.Drawable icon = getColoredMarkerIcon(t.color);
 
             for (PointRecord r : markerRecords) {
                 Marker m = new Marker(map);
                 m.setPosition(new GeoPoint(r.lat, r.lon));
 
-                String baseTitle = t.name + ("HIGHLIGHT".equals(r.type) ? " (Highlight)" : "");
+                // Wichtig: setIcon vor setAnchor
+                m.setIcon(icon);
+                m.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM);
+
+                String baseTitle = t.name + ("HIGHLIGHT".equals(r.mode) ? " (Highlight)" : "");
                 m.setTitle(baseTitle);
 
                 PointMeta pm = meta.get(r.ts);
@@ -517,9 +619,7 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
                     m.setSnippet("");
                 }
 
-                m.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM);
                 m.setRelatedObject(new MarkerKey(t.filename, r.ts));
-
                 m.setOnMarkerClickListener((marker, mapView) -> {
                     MarkerKey key = (MarkerKey) marker.getRelatedObject();
                     TrackInfo track = findTrackByFilename(key.trackFilename);
@@ -531,27 +631,66 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
                 map.getOverlays().add(m);
             }
 
-            // Polyline immer aus allen Punkten
-            List<GeoPoint> allPts = toGeoPoints(allRecords);
-            if (allPts.size() > 1) {
+            // Polyline ebenfalls nur aus sichtbaren Punkten (ohne Continuous)
+            List<GeoPoint> pts = toGeoPoints(visibleRecords);
+            if (pts.size() > 1) {
                 Polyline line = new Polyline(map);
-                line.setPoints(allPts);
+                line.setPoints(pts);
                 line.setColor(t.color);
                 line.setWidth(continuousMode ? 8f : 15f);
                 map.getOverlays().add(line);
             }
         }
 
+        // Standort-Overlay immer oben drüber
+        if (myLocationOverlay != null) {
+            map.getOverlays().add(myLocationOverlay);
+        }
+
+        // Center auf letzten sichtbaren Punkt
         if (currentTrack != null) {
-            List<PointRecord> pts = loadRecordsFromCsv(currentTrack.filename);
-            if (!pts.isEmpty()) {
-                PointRecord last = pts.get(pts.size() - 1);
+            List<PointRecord> all = loadRecordsFromCsv(currentTrack.filename);
+            List<PointRecord> visible = filterOutContinuous(all);
+            if (!visible.isEmpty()) {
+                PointRecord last = visible.get(visible.size() - 1);
                 map.getController().setCenter(new GeoPoint(last.lat, last.lon));
                 map.getController().setZoom(continuousMode ? 18 : 15);
             }
         }
 
         map.invalidate();
+    }
+
+    private android.graphics.drawable.Drawable getColoredMarkerIcon(int color) {
+        android.graphics.drawable.Drawable cached = markerIconCache.get(color);
+        if (cached != null) return cached;
+
+        float density = getResources().getDisplayMetrics().density;
+        int size = (int) (22 * density);
+        int stroke = (int) (2 * density);
+
+        android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888);
+        android.graphics.Canvas c = new android.graphics.Canvas(bmp);
+
+        android.graphics.Paint pFill = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        pFill.setStyle(android.graphics.Paint.Style.FILL);
+        pFill.setColor(color);
+
+        android.graphics.Paint pStroke = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        pStroke.setStyle(android.graphics.Paint.Style.STROKE);
+        pStroke.setStrokeWidth(stroke);
+        pStroke.setColor(0xFFFFFFFF);
+
+        float cx = size / 2f;
+        float cy = size / 2f;
+        float r = (size / 2f) - stroke;
+
+        c.drawCircle(cx, cy, r, pFill);
+        c.drawCircle(cx, cy, r, pStroke);
+
+        android.graphics.drawable.Drawable d = new android.graphics.drawable.BitmapDrawable(getResources(), bmp);
+        markerIconCache.put(color, d);
+        return d;
     }
 
     private TrackInfo findTrackByFilename(String filename) {
@@ -561,11 +700,81 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         return null;
     }
 
+    // --- Standort Overlay Update (Kreis + Pfeil) ---
+    private void updateMyLocationOverlay() {
+        if (myLocationOverlay == null || lastLocation == null) return;
+
+        myLocationOverlay.setLocation(new GeoPoint(lastLocation.getLatitude(), lastLocation.getLongitude()));
+
+        int acc = (int) lastLocation.getAccuracy();
+        if (acc <= 0) acc = 0;
+        myLocationOverlay.setAccuracy(acc);
+
+        // Pfeil: Blickrichtung (Kompass). Fallback: GPS bearing, wenn vorhanden.
+        float bearing;
+        if (!Float.isNaN(lastAzimuthDeg)) bearing = lastAzimuthDeg;
+        else if (lastLocation.hasBearing()) bearing = lastLocation.getBearing();
+        else bearing = 0f;
+
+        myLocationOverlay.setBearing(bearing);
+        map.postInvalidate();
+    }
+
+    // --- SensorEventListener (Blickrichtung) ---
+    @Override
+    public void onSensorChanged(SensorEvent event) {
+        if (event.sensor.getType() != Sensor.TYPE_ROTATION_VECTOR) return;
+
+        float[] rotationMatrix = new float[9];
+        float[] orientation = new float[3];
+
+        SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values);
+
+        // Display-Rotation berücksichtigen
+        int rotation = Surface.ROTATION_0;
+        WindowManager wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+        if (wm != null && wm.getDefaultDisplay() != null) {
+            rotation = wm.getDefaultDisplay().getRotation();
+        }
+
+        float[] adjustedMatrix = new float[9];
+        switch (rotation) {
+            case Surface.ROTATION_90:
+                SensorManager.remapCoordinateSystem(rotationMatrix, SensorManager.AXIS_Y, SensorManager.AXIS_MINUS_X, adjustedMatrix);
+                break;
+            case Surface.ROTATION_180:
+                SensorManager.remapCoordinateSystem(rotationMatrix, SensorManager.AXIS_MINUS_X, SensorManager.AXIS_MINUS_Y, adjustedMatrix);
+                break;
+            case Surface.ROTATION_270:
+                SensorManager.remapCoordinateSystem(rotationMatrix, SensorManager.AXIS_MINUS_Y, SensorManager.AXIS_X, adjustedMatrix);
+                break;
+            case Surface.ROTATION_0:
+            default:
+                adjustedMatrix = rotationMatrix;
+                break;
+        }
+
+        SensorManager.getOrientation(adjustedMatrix, orientation);
+
+        float azimuthRad = orientation[0];
+        float azimuthDeg = (float) Math.toDegrees(azimuthRad);
+        azimuthDeg = (azimuthDeg + 360f) % 360f;
+
+        // Entprellen: nur updaten wenn sich etwas ändert
+        if (Float.isNaN(lastAzimuthDeg) || Math.abs(azimuthDeg - lastAzimuthDeg) > 1.5f) {
+            lastAzimuthDeg = azimuthDeg;
+            updateMyLocationOverlay();
+        }
+    }
+
+    @Override
+    public void onAccuracyChanged(Sensor sensor, int accuracy) { }
+
+    // --- Marker-Edit Dialog (Kommentar + Bilder) ---
     private void showMarkerEditDialog(TrackInfo track, String ts) {
         Map<String, PointMeta> meta = getMetaMap(track);
         PointMeta pm = meta.getOrDefault(ts, new PointMeta());
 
-        // UI programmatic (kein extra layout nötig)
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         int pad = (int) (16 * getResources().getDisplayMetrics().density);
@@ -667,14 +876,13 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         return File.createTempFile(imageFileName, ".jpg", storageDir);
     }
 
+    // --- Meta JSON ---
     private File metaFileForTrack(TrackInfo t) {
         return new File(getFilesDir(), t.filename + ".meta.json");
     }
 
     private Map<String, PointMeta> getMetaMap(TrackInfo t) {
-        if (metaCache.containsKey(t.filename)) {
-            return metaCache.get(t.filename);
-        }
+        if (metaCache.containsKey(t.filename)) return metaCache.get(t.filename);
         Map<String, PointMeta> loaded = loadMetaForTrack(t);
         metaCache.put(t.filename, loaded);
         return loaded;
@@ -684,7 +892,7 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         File f = metaFileForTrack(t);
         if (!f.exists()) return new HashMap<>();
         try (FileInputStream fis = openFileInput(f.getName());
-             BufferedReader reader = new BufferedReader(new InputStreamReader(fis))) {
+             BufferedReader reader = new BufferedReader(new InputStreamReader(fis, StandardCharsets.UTF_8))) {
 
             StringBuilder sb = new StringBuilder();
             String line;
@@ -702,27 +910,139 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         File f = metaFileForTrack(t);
         String json = gson.toJson(meta);
         try (FileOutputStream fos = openFileOutput(f.getName(), MODE_PRIVATE)) {
-            fos.write(json.getBytes());
+            fos.write(json.getBytes(StandardCharsets.UTF_8));
         } catch (Exception ignored) { }
         metaCache.put(t.filename, meta);
     }
 
-    private void shareCsvFile(String filename) {
-        File file = new File(getFilesDir(), filename);
-
-        if (!file.exists()) {
-            Toast.makeText(this, "CSV-Datei nicht gefunden", Toast.LENGTH_SHORT).show();
+    // --- Export: ZIP (CSV + Bilder) ---
+    private void showExportDialog() {
+        if (tracks.isEmpty()) {
+            Toast.makeText(this, "Keine Tracks vorhanden", Toast.LENGTH_SHORT).show();
             return;
         }
+        String[] names = new String[tracks.size()];
+        for (int i = 0; i < tracks.size(); i++) names[i] = tracks.get(i).name;
 
-        Uri uri = FileProvider.getUriForFile(this, getPackageName() + ".fileprovider", file);
+        AlertDialog.Builder builder = new AlertDialog.Builder(this);
+        builder.setTitle("Track zum Export wählen");
+        builder.setItems(names, (dialog, which) -> exportTrackZip(tracks.get(which)));
+        builder.show();
+    }
 
-        Intent intent = new Intent(Intent.ACTION_SEND);
-        intent.setType("text/csv");
-        intent.putExtra(Intent.EXTRA_STREAM, uri);
-        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+    private void exportTrackZip(TrackInfo track) {
+        try {
+            File zipFile = buildZipForTrack(track);
 
-        startActivity(Intent.createChooser(intent, "CSV-Datei teilen"));
+            Uri uri = FileProvider.getUriForFile(
+                    this, getPackageName() + ".fileprovider", zipFile
+            );
+
+            Intent intent = new Intent(Intent.ACTION_SEND);
+            intent.setType("application/zip");
+            intent.putExtra(Intent.EXTRA_STREAM, uri);
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+
+            startActivity(Intent.createChooser(intent, "ZIP exportieren"));
+        } catch (Exception e) {
+            e.printStackTrace();
+            Toast.makeText(this, "Export fehlgeschlagen: " + e.getClass().getSimpleName() +
+                    " / " + e.getMessage(), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private File buildZipForTrack(TrackInfo track) throws IOException {
+        // Export enthält ALLE Punkte (MANUAL/CONTINUOUS/HIGHLIGHT)
+        List<PointRecord> records = loadRecordsFromCsv(track.filename);
+        records.sort((a, b) -> a.ts.compareTo(b.ts));
+
+        Map<String, PointMeta> meta = getMetaMap(track);
+
+        String safeName = (track.name == null ? "track" : track.name).replaceAll("[^a-zA-Z0-9_\\-]+", "_");
+        File outZip = new File(getCacheDir(), safeName + "_" + System.currentTimeMillis() + ".zip");
+
+        int imgCounter = 1;
+
+        try (ZipOutputStream zos = new ZipOutputStream(
+                new BufferedOutputStream(new FileOutputStream(outZip)))) {
+
+            StringBuilder csv = new StringBuilder();
+            csv.append("Timestamp,Latitude,Longitude,Mode,Images\n");
+
+            for (PointRecord r : records) {
+                PointMeta pm = meta.get(r.ts);
+
+                List<String> exportedNames = new ArrayList<>();
+                if (pm != null && pm.imageUris != null) {
+                    for (String uriStr : pm.imageUris) {
+                        if (uriStr == null || uriStr.trim().isEmpty()) continue;
+
+                        Uri u;
+                        try { u = Uri.parse(uriStr); } catch (Exception ex) { continue; }
+
+                        String ext = guessExtension(u);
+                        String baseName = String.format(Locale.US, "%04d%s", imgCounter++, ext);
+                        String zipPath = "images/" + baseName;
+
+                        try (InputStream in = getContentResolver().openInputStream(u)) {
+                            if (in == null) continue;
+
+                            zos.putNextEntry(new ZipEntry(zipPath));
+                            copyStream(in, zos);
+                            zos.closeEntry();
+
+                            exportedNames.add(baseName);
+                        } catch (Exception ignored) { }
+                    }
+                }
+
+                String imagesCell = String.join(";", exportedNames);
+                csv.append(csvEscape(r.ts)).append(",")
+                        .append(r.lat).append(",")
+                        .append(r.lon).append(",")
+                        .append(csvEscape(r.mode)).append(",")
+                        .append(csvEscape(imagesCell)).append("\n");
+            }
+
+            zos.putNextEntry(new ZipEntry(safeName + ".csv"));
+            zos.write(csv.toString().getBytes(StandardCharsets.UTF_8));
+            zos.closeEntry();
+        }
+
+        return outZip;
+    }
+
+    private String guessExtension(Uri u) {
+        try {
+            String mime = getContentResolver().getType(u);
+            if (mime != null) {
+                String e = MimeTypeMap.getSingleton().getExtensionFromMimeType(mime);
+                if (e != null && !e.isEmpty()) return "." + e;
+            }
+        } catch (Exception ignored) { }
+
+        String p = u.getPath();
+        if (p != null) {
+            int dot = p.lastIndexOf('.');
+            if (dot >= 0 && dot < p.length() - 1) {
+                String ext = p.substring(dot);
+                if (ext.length() <= 6) return ext;
+            }
+        }
+        return ".jpg";
+    }
+
+    private static void copyStream(InputStream in, OutputStream out) throws IOException {
+        byte[] buf = new byte[8192];
+        int n;
+        while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+    }
+
+    private static String csvEscape(String s) {
+        if (s == null) return "";
+        boolean needs = s.contains(",") || s.contains("\"") || s.contains("\n") || s.contains("\r");
+        if (!needs) return s;
+        return "\"" + s.replace("\"", "\"\"") + "\"";
     }
 
     // --- Keyboard helper ---
@@ -732,6 +1052,7 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         if (imm != null) imm.hideSoftInputFromWindow(v.getWindowToken(), 0);
     }
 
+    // --- Track Dialoge (wie vorher) ---
     private void showCreateTrackDialog() {
         String[] colorNames = {"Rot", "Grün", "Blau", "Orange", "Lila"};
         int[] colorValues = {0xFFFF0000, 0xFF00FF00, 0xFF0000FF, 0xFFFF8800, 0xFFAA00FF};
@@ -741,7 +1062,6 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         AlertDialog.Builder builder = new AlertDialog.Builder(this);
         Context themedCtx = builder.getContext();
 
-        // --- Custom Title oben + Button (wird nicht von Tastatur verdeckt) ---
         LinearLayout titleBar = new LinearLayout(themedCtx);
         titleBar.setOrientation(LinearLayout.HORIZONTAL);
         int pad = (int) (16 * getResources().getDisplayMetrics().density);
@@ -761,12 +1081,10 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
 
         builder.setCustomTitle(titleBar);
 
-        // --- Inhalt ---
         final EditText input = new EditText(themedCtx);
         input.setHint("Track-Name");
         builder.setView(input);
 
-        // "Done" Taste auf der Tastatur + Listener, der NUR Tastatur schließt
         input.setSingleLine(true);
         input.setImeOptions(EditorInfo.IME_ACTION_DONE);
         input.setOnEditorActionListener((v, actionId, event) -> {
@@ -785,7 +1103,6 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
 
         builder.setSingleChoiceItems(colorNames, 0, (dialog, which) -> selectedIndex[0] = which);
 
-        // Buttons unten (OK/Abbrechen) ohne Auto-Dismiss (für Validierung)
         builder.setPositiveButton("OK", null);
         builder.setNegativeButton("Abbrechen", null);
 
@@ -812,7 +1129,7 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
                 tracks.add(t);
 
                 boolean[] newVisible = new boolean[tracks.size()];
-                System.arraycopy(visibleTracks, 0, newVisible, 0, visibleTracks.length);
+                System.arraycopy(visibleTracks, 0, newVisible, 0, Math.min(visibleTracks.length, newVisible.length));
                 newVisible[tracks.size() - 1] = true;
                 visibleTracks = newVisible;
 
@@ -883,20 +1200,6 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         builder.show();
     }
 
-    private void showExportDialog() {
-        if (tracks.isEmpty()) {
-            Toast.makeText(this, "Keine Tracks vorhanden", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        String[] names = new String[tracks.size()];
-        for (int i = 0; i < tracks.size(); i++) names[i] = tracks.get(i).name;
-
-        AlertDialog.Builder builder = new AlertDialog.Builder(this);
-        builder.setTitle("Track zum Export wählen");
-        builder.setItems(names, (dialog, which) -> shareCsvFile(tracks.get(which).filename));
-        builder.show();
-    }
-
     private void showDeleteTrackDialog() {
         if (tracks.isEmpty()) {
             Toast.makeText(this, "Keine Tracks vorhanden", Toast.LENGTH_SHORT).show();
@@ -929,6 +1232,7 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         builder.show();
     }
 
+    // --- Prefs ---
     private void loadTracksFromPrefs() {
         SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
         String json = prefs.getString(PREF_TRACKS, "[]");
@@ -1007,6 +1311,7 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         saveCurrentTrackToPrefs();
     }
 
+    // --- Location updates ---
     private void startLocationUpdates() {
         LocationRequest locationRequest = LocationRequest.create();
         locationRequest.setInterval(continuousMode ? 2000 : 1000);
@@ -1028,11 +1333,20 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
     protected void onPause() {
         super.onPause();
         stopLocationUpdates();
+
+        if (sensorManager != null) {
+            sensorManager.unregisterListener(this);
+        }
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+
+        if (sensorManager != null && rotationVectorSensor != null) {
+            sensorManager.registerListener(this, rotationVectorSensor, SensorManager.SENSOR_DELAY_UI);
+        }
+
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
                 == PackageManager.PERMISSION_GRANTED) {
             startLocationUpdates();
