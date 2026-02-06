@@ -1,10 +1,14 @@
 package com.example.geotracker;
 
 import android.Manifest;
+import android.app.Activity;
+import android.content.ClipData;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
+import android.hardware.Camera;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
@@ -14,6 +18,7 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
 import android.preference.PreferenceManager;
+import android.provider.MediaStore;
 import android.view.KeyEvent;
 import android.view.Menu;
 import android.view.MenuItem;
@@ -33,8 +38,10 @@ import android.widget.Toast;
 
 import androidx.activity.EdgeToEdge;
 import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContract;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 import androidx.appcompat.app.ActionBarDrawerToggle;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
@@ -84,7 +91,8 @@ import java.util.Map;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
-public class MainActivity extends AppCompatActivity implements NavigationView.OnNavigationItemSelectedListener, SensorEventListener {
+public class MainActivity extends AppCompatActivity
+        implements NavigationView.OnNavigationItemSelectedListener, SensorEventListener {
 
     private static final int PERMISSIONS_REQUEST_LOCATION = 100;
     private static final String PREF_TRACKS = "tracks_json";
@@ -162,11 +170,60 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
 
     // Bild-Picker / Kamera
     private ActivityResultLauncher<String[]> pickImageLauncher;
-    private ActivityResultLauncher<Uri> takePictureLauncher;
+    private ActivityResultLauncher<Uri> takePictureBackLauncher;
 
     private TrackInfo pendingImageTrack = null;
     private String pendingImageTs = null;
     private Uri pendingCameraUri = null;
+
+    // Aktiver Marker-Edit-Dialog (für Live-Preview Updates)
+    private AlertDialog activeMarkerDialog = null;
+    private TrackInfo activeEditTrack = null;
+    private String activeEditTs = null;
+    private TextView activeImagesText = null;
+    private ImageView activePreview = null;
+    private EditText activeEtComment = null;
+
+    /**
+     * Custom Contract: ACTION_IMAGE_CAPTURE mit "Back camera" Hints + sauberen URI-Permissions.
+     * (Nicht garantiert, aber best-effort mit externer Kamera-App.)
+     */
+    public static class TakePicturePreferBackCamera extends ActivityResultContract<Uri, Boolean> {
+
+        @NonNull
+        @Override
+        public Intent createIntent(@NonNull Context context, Uri input) {
+            Intent intent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+            intent.putExtra(MediaStore.EXTRA_OUTPUT, input);
+
+            // Wichtig: URI Permissions explizit setzen (damit die Kamera wirklich schreiben kann)
+            intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            intent.setClipData(ClipData.newRawUri("photo", input));
+
+            // Back-Camera Hints (werden von manchen Kamera-Apps beachtet, von manchen ignoriert)
+            intent.putExtra("android.intent.extras.CAMERA_FACING", Camera.CameraInfo.CAMERA_FACING_BACK);
+            intent.putExtra("android.intent.extra.USE_FRONT_CAMERA", false);
+            intent.putExtra("android.intent.extras.LENS_FACING_FRONT", 0);
+            intent.putExtra("android.intent.extras.LENS_FACING_BACK", 1);
+
+            // URI Permission an alle möglichen Kamera-Activities grant-en
+            List<ResolveInfo> resInfoList = context.getPackageManager()
+                    .queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY);
+
+            for (ResolveInfo resolveInfo : resInfoList) {
+                String packageName = resolveInfo.activityInfo.packageName;
+                context.grantUriPermission(packageName, input,
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            }
+
+            return intent;
+        }
+
+        @Override
+        public Boolean parseResult(int resultCode, @Nullable Intent intent) {
+            return resultCode == Activity.RESULT_OK;
+        }
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -252,10 +309,8 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
                             (continuousMode ? "\n[CONTINUOUS MODE]" : "");
                     textView.setText(coords);
 
-                    // Overlay updaten
                     updateMyLocationOverlay();
 
-                    // Continuous Tracking
                     if (continuousMode && currentTrack != null) {
                         saveLocationContinuous(location);
                     }
@@ -294,10 +349,17 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
     }
 
     private void initActivityResultLaunchers() {
+
         pickImageLauncher = registerForActivityResult(
                 new ActivityResultContracts.OpenDocument(),
                 uri -> {
-                    if (uri == null || pendingImageTrack == null || pendingImageTs == null) return;
+                    // Pending sofort "leeren", damit es nie hängen bleibt (wichtig fürs "erst beim 2. Mal" Problem)
+                    final TrackInfo track = pendingImageTrack;
+                    final String ts = pendingImageTs;
+                    pendingImageTrack = null;
+                    pendingImageTs = null;
+
+                    if (uri == null || track == null || ts == null) return;
 
                     try {
                         getContentResolver().takePersistableUriPermission(
@@ -305,40 +367,38 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
                         );
                     } catch (Exception ignored) { }
 
-                    Map<String, PointMeta> meta = getMetaMap(pendingImageTrack);
-                    PointMeta pm = meta.getOrDefault(pendingImageTs, new PointMeta());
+                    Map<String, PointMeta> meta = getMetaMap(track);
+                    PointMeta pm = meta.getOrDefault(ts, new PointMeta());
                     pm.imageUris.add(uri.toString());
-                    meta.put(pendingImageTs, pm);
-                    saveMetaForTrack(pendingImageTrack, meta);
-
-                    pendingImageTrack = null;
-                    pendingImageTs = null;
+                    meta.put(ts, pm);
+                    saveMetaForTrack(track, meta);
 
                     loadAllTracksAndUpdateMap();
+                    refreshActiveMarkerDialogUiIfOpen();
                 }
         );
 
-        takePictureLauncher = registerForActivityResult(
-                new ActivityResultContracts.TakePicture(),
+        takePictureBackLauncher = registerForActivityResult(
+                new TakePicturePreferBackCamera(),
                 success -> {
-                    if (!success || pendingCameraUri == null || pendingImageTrack == null || pendingImageTs == null) {
-                        pendingCameraUri = null;
-                        pendingImageTrack = null;
-                        pendingImageTs = null;
-                        return;
-                    }
-
-                    Map<String, PointMeta> meta = getMetaMap(pendingImageTrack);
-                    PointMeta pm = meta.getOrDefault(pendingImageTs, new PointMeta());
-                    pm.imageUris.add(pendingCameraUri.toString());
-                    meta.put(pendingImageTs, pm);
-                    saveMetaForTrack(pendingImageTrack, meta);
-
-                    pendingCameraUri = null;
+                    // Pending sofort "leeren", damit es nie hängen bleibt
+                    final TrackInfo track = pendingImageTrack;
+                    final String ts = pendingImageTs;
+                    final Uri photoUri = pendingCameraUri;
                     pendingImageTrack = null;
                     pendingImageTs = null;
+                    pendingCameraUri = null;
+
+                    if (!success || photoUri == null || track == null || ts == null) return;
+
+                    Map<String, PointMeta> meta = getMetaMap(track);
+                    PointMeta pm = meta.getOrDefault(ts, new PointMeta());
+                    pm.imageUris.add(photoUri.toString());
+                    meta.put(ts, pm);
+                    saveMetaForTrack(track, meta);
 
                     loadAllTracksAndUpdateMap();
+                    refreshActiveMarkerDialogUiIfOpen();
                 }
         );
     }
@@ -770,7 +830,49 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
     @Override
     public void onAccuracyChanged(Sensor sensor, int accuracy) { }
 
-    // --- Marker-Edit Dialog (Kommentar + Bilder) ---
+    // ---------- Keyboard Helper (Enter schließt Tastatur) ----------
+
+    private void installEnterClosesKeyboard(EditText et, boolean singleLine) {
+        if (et == null) return;
+        et.setSingleLine(singleLine);
+        et.setImeOptions(EditorInfo.IME_ACTION_DONE);
+        et.setOnEditorActionListener((v, actionId, event) -> {
+            boolean isDone = actionId == EditorInfo.IME_ACTION_DONE;
+            boolean isEnter = (event != null
+                    && event.getKeyCode() == KeyEvent.KEYCODE_ENTER
+                    && event.getAction() == KeyEvent.ACTION_DOWN);
+
+            if (isDone || isEnter) {
+                hideKeyboard(et);
+                et.clearFocus();
+                return true;
+            }
+            return false;
+        });
+    }
+
+    private void hideKeyboard(View v) {
+        if (v == null) return;
+        InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+        if (imm != null) imm.hideSoftInputFromWindow(v.getWindowToken(), 0);
+    }
+
+    // ---------- Marker-Edit Dialog (Kommentar + Bilder) ----------
+
+    private void refreshActiveMarkerDialogUiIfOpen() {
+        if (activeMarkerDialog == null || !activeMarkerDialog.isShowing()) return;
+        if (activeEditTrack == null || activeEditTs == null) return;
+        if (activeImagesText == null || activePreview == null) return;
+
+        Map<String, PointMeta> meta = getMetaMap(activeEditTrack);
+        PointMeta pm = meta.getOrDefault(activeEditTs, new PointMeta());
+
+        activeImagesText.setText(imageSummary(pm));
+        Uri first = firstImageUri(pm);
+        if (first != null) activePreview.setImageURI(first);
+        else activePreview.setImageDrawable(null);
+    }
+
     private void showMarkerEditDialog(TrackInfo track, String ts) {
         Map<String, PointMeta> meta = getMetaMap(track);
         PointMeta pm = meta.getOrDefault(ts, new PointMeta());
@@ -783,6 +885,8 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         EditText etComment = new EditText(this);
         etComment.setHint("Kommentar");
         etComment.setText(pm.comment != null ? pm.comment : "");
+        // Anforderung: Enter schließt die Tastatur -> singleLine=true (kein Zeilenumbruch)
+        installEnterClosesKeyboard(etComment, true);
         root.addView(etComment, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
@@ -808,7 +912,7 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         root.addView(btnPick);
 
         Button btnCamera = new Button(this);
-        btnCamera.setText("Foto aufnehmen");
+        btnCamera.setText("Foto aufnehmen (Rückkamera)");
         btnCamera.setOnClickListener(v -> {
             try {
                 File photo = createImageFile();
@@ -822,7 +926,7 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
                 pendingImageTs = ts;
                 pendingCameraUri = uri;
 
-                takePictureLauncher.launch(uri);
+                takePictureBackLauncher.launch(uri);
             } catch (Exception e) {
                 e.printStackTrace();
                 Toast.makeText(this, "Kamera-Fehler", Toast.LENGTH_SHORT).show();
@@ -833,9 +937,16 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         Button btnRemoveImages = new Button(this);
         btnRemoveImages.setText("Bilder entfernen");
         btnRemoveImages.setOnClickListener(v -> {
-            pm.imageUris.clear();
-            tvImages.setText(imageSummary(pm));
+            // Jetzt: sofort persistieren (nicht erst nach "Speichern")
+            Map<String, PointMeta> meta2 = getMetaMap(track);
+            PointMeta pm2 = meta2.getOrDefault(ts, new PointMeta());
+            pm2.imageUris.clear();
+            meta2.put(ts, pm2);
+            saveMetaForTrack(track, meta2);
+
+            tvImages.setText(imageSummary(pm2));
             preview.setImageDrawable(null);
+            loadAllTracksAndUpdateMap();
         });
         root.addView(btnRemoveImages);
 
@@ -844,14 +955,35 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         builder.setView(root);
 
         builder.setPositiveButton("Speichern", (d, w) -> {
-            pm.comment = etComment.getText().toString();
-            meta.put(ts, pm);
-            saveMetaForTrack(track, meta);
+            Map<String, PointMeta> meta3 = getMetaMap(track);
+            PointMeta pm3 = meta3.getOrDefault(ts, new PointMeta());
+            pm3.comment = etComment.getText().toString();
+            meta3.put(ts, pm3);
+            saveMetaForTrack(track, meta3);
             loadAllTracksAndUpdateMap();
         });
 
         builder.setNegativeButton("Abbrechen", null);
-        builder.show();
+
+        AlertDialog dialog = builder.create();
+        dialog.setOnDismissListener(d -> {
+            // Dialog-Refs zurücksetzen
+            activeMarkerDialog = null;
+            activeEditTrack = null;
+            activeEditTs = null;
+            activeImagesText = null;
+            activePreview = null;
+            activeEtComment = null;
+        });
+        dialog.show();
+
+        // Aktiven Dialog merken (damit TakePicture/OpenDocument Callback die UI sofort aktualisieren kann)
+        activeMarkerDialog = dialog;
+        activeEditTrack = track;
+        activeEditTs = ts;
+        activeImagesText = tvImages;
+        activePreview = preview;
+        activeEtComment = etComment;
     }
 
     private String imageSummary(PointMeta pm) {
@@ -876,7 +1008,8 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         return File.createTempFile(imageFileName, ".jpg", storageDir);
     }
 
-    // --- Meta JSON ---
+    // ---------- Meta JSON ----------
+
     private File metaFileForTrack(TrackInfo t) {
         return new File(getFilesDir(), t.filename + ".meta.json");
     }
@@ -915,7 +1048,8 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         metaCache.put(t.filename, meta);
     }
 
-    // --- Export: ZIP (CSV + Bilder) ---
+    // ---------- Export: ZIP (CSV + Bilder) ----------
+
     private void showExportDialog() {
         if (tracks.isEmpty()) {
             Toast.makeText(this, "Keine Tracks vorhanden", Toast.LENGTH_SHORT).show();
@@ -1045,14 +1179,8 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         return "\"" + s.replace("\"", "\"\"") + "\"";
     }
 
-    // --- Keyboard helper ---
-    private void hideKeyboard(View v) {
-        if (v == null) return;
-        InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
-        if (imm != null) imm.hideSoftInputFromWindow(v.getWindowToken(), 0);
-    }
+    // ---------- Track Dialoge wie vorher ----------
 
-    // --- Track Dialoge (wie vorher) ---
     private void showCreateTrackDialog() {
         String[] colorNames = {"Rot", "Grün", "Blau", "Orange", "Lila"};
         int[] colorValues = {0xFFFF0000, 0xFF00FF00, 0xFF0000FF, 0xFFFF8800, 0xFFAA00FF};
@@ -1078,36 +1206,18 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
 
         titleBar.addView(tvTitle);
         titleBar.addView(btnHideKb);
-
         builder.setCustomTitle(titleBar);
 
         final EditText input = new EditText(themedCtx);
         input.setHint("Track-Name");
+        installEnterClosesKeyboard(input, true);
         builder.setView(input);
 
-        input.setSingleLine(true);
-        input.setImeOptions(EditorInfo.IME_ACTION_DONE);
-        input.setOnEditorActionListener((v, actionId, event) -> {
-            boolean isDone = actionId == EditorInfo.IME_ACTION_DONE;
-            boolean isEnter = event != null
-                    && event.getKeyCode() == KeyEvent.KEYCODE_ENTER
-                    && event.getAction() == KeyEvent.ACTION_DOWN;
-
-            if (isDone || isEnter) {
-                hideKeyboard(input);
-                input.clearFocus();
-                return true;
-            }
-            return false;
-        });
-
         builder.setSingleChoiceItems(colorNames, 0, (dialog, which) -> selectedIndex[0] = which);
-
         builder.setPositiveButton("OK", null);
         builder.setNegativeButton("Abbrechen", null);
 
         AlertDialog dialog = builder.create();
-
         dialog.setOnShowListener(d -> {
             btnHideKb.setOnClickListener(v -> {
                 hideKeyboard(input);
@@ -1123,8 +1233,9 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
 
                 hideKeyboard(input);
 
-                String filename = "track_" + name.replaceAll("\\s+", "_") + ".csv";
+                String filename = "track_" + name.replaceAll("[^a-zA-Z0-9_\\-]+", "_") + ".csv";
                 int color = colorValues[selectedIndex[0]];
+
                 TrackInfo t = new TrackInfo(name, filename, color);
                 tracks.add(t);
 
@@ -1138,8 +1249,8 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
 
                 File f = new File(getFilesDir(), filename);
                 ensureCsvHasHeader(f);
-                loadAllTracksAndUpdateMap();
 
+                loadAllTracksAndUpdateMap();
                 dialog.dismiss();
             });
 
@@ -1162,9 +1273,7 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         int checked = -1;
         for (int i = 0; i < tracks.size(); i++) {
             names[i] = tracks.get(i).name;
-            if (currentTrack != null && tracks.get(i).name.equals(currentTrack.name)) {
-                checked = i;
-            }
+            if (currentTrack != null && tracks.get(i).name.equals(currentTrack.name)) checked = i;
         }
 
         AlertDialog.Builder builder = new AlertDialog.Builder(this);
@@ -1205,6 +1314,7 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
             Toast.makeText(this, "Keine Tracks vorhanden", Toast.LENGTH_SHORT).show();
             return;
         }
+
         String[] names = new String[tracks.size()];
         for (int i = 0; i < tracks.size(); i++) names[i] = tracks.get(i).name;
 
@@ -1212,6 +1322,7 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         builder.setTitle("Track löschen");
         builder.setItems(names, (dialog, which) -> {
             TrackInfo t = tracks.get(which);
+
             deleteFile(t.filename);
             File meta = metaFileForTrack(t);
             if (meta.exists()) deleteFile(meta.getName());
@@ -1220,19 +1331,23 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
             tracks.remove(which);
 
             boolean[] newVisible = new boolean[tracks.size()];
-            for (int i = 0; i < newVisible.length; i++) newVisible[i] = i < visibleTracks.length && visibleTracks[i];
+            for (int i = 0; i < newVisible.length; i++) {
+                newVisible[i] = (i < visibleTracks.length) && visibleTracks[i];
+            }
             visibleTracks = newVisible;
 
             if (currentTrack != null && currentTrack.name.equals(t.name)) {
                 currentTrack = tracks.isEmpty() ? null : tracks.get(0);
             }
+
             saveAllTrackPrefs();
             loadAllTracksAndUpdateMap();
         });
         builder.show();
     }
 
-    // --- Prefs ---
+    // ---------- Prefs ----------
+
     private void loadTracksFromPrefs() {
         SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
         String json = prefs.getString(PREF_TRACKS, "[]");
@@ -1253,14 +1368,13 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
     private void loadVisibleFromPrefs() {
         SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
         String json = prefs.getString(PREF_VISIBLE, "");
-        if (json.isEmpty()) {
+        if (json == null || json.isEmpty()) {
             visibleTracks = new boolean[tracks.size()];
             for (int i = 0; i < visibleTracks.length; i++) visibleTracks[i] = true;
         } else {
             boolean[] arr = gson.fromJson(json, boolean[].class);
-            if (arr != null && arr.length == tracks.size()) {
-                visibleTracks = arr;
-            } else {
+            if (arr != null && arr.length == tracks.size()) visibleTracks = arr;
+            else {
                 visibleTracks = new boolean[tracks.size()];
                 for (int i = 0; i < visibleTracks.length; i++) visibleTracks[i] = true;
             }
@@ -1269,10 +1383,7 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
 
     private void saveVisibleToPrefs() {
         SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
-        SharedPreferences.Editor ed = prefs.edit();
-        String json = gson.toJson(visibleTracks);
-        ed.putString(PREF_VISIBLE, json);
-        ed.apply();
+        prefs.edit().putString(PREF_VISIBLE, gson.toJson(visibleTracks)).apply();
     }
 
     private void loadCurrentTrackFromPrefs() {
@@ -1289,9 +1400,7 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
 
     private void saveCurrentTrackToPrefs() {
         SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
-        SharedPreferences.Editor ed = prefs.edit();
-        ed.putString(PREF_CURRENT, currentTrack != null ? currentTrack.name : null);
-        ed.apply();
+        prefs.edit().putString(PREF_CURRENT, currentTrack != null ? currentTrack.name : null).apply();
         saveTracksToPrefs();
     }
 
@@ -1311,7 +1420,8 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         saveCurrentTrackToPrefs();
     }
 
-    // --- Location updates ---
+    // ---------- Location updates ----------
+
     private void startLocationUpdates() {
         LocationRequest locationRequest = LocationRequest.create();
         locationRequest.setInterval(continuousMode ? 2000 : 1000);
@@ -1319,9 +1429,8 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         locationRequest.setPriority(LocationRequest.PRIORITY_HIGH_ACCURACY);
 
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
-                != PackageManager.PERMISSION_GRANTED) {
-            return;
-        }
+                != PackageManager.PERMISSION_GRANTED) return;
+
         fusedLocationClient.requestLocationUpdates(locationRequest, locationCallback, null);
     }
 
@@ -1333,25 +1442,20 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
     protected void onPause() {
         super.onPause();
         stopLocationUpdates();
-
-        if (sensorManager != null) {
-            sensorManager.unregisterListener(this);
-        }
+        if (sensorManager != null) sensorManager.unregisterListener(this);
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-
         if (sensorManager != null && rotationVectorSensor != null) {
             sensorManager.registerListener(this, rotationVectorSensor, SensorManager.SENSOR_DELAY_UI);
         }
-
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
                 == PackageManager.PERMISSION_GRANTED) {
             startLocationUpdates();
-            loadAllTracksAndUpdateMap();
         }
+        loadAllTracksAndUpdateMap();
     }
 
     @Override
